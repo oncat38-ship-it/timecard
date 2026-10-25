@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>☕ 休憩タイムカード</title>
   
-  <!-- スマホのホーム画面に追加したときのアイコン設定（コード埋め込みSVG） -->
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 rx=%2222%22 fill=%22%232563eb%22/><text x=%2250%22 y=%2255%22 font-size=%2250%22 text-anchor=%22middle%22 dominant-baseline=%22middle%22>⏱️</text></svg>">
   <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 rx=%2222%22 fill=%22%232563eb%22/><text x=%2250%22 y=%2255%22 font-size=%2250%22 text-anchor=%22middle%22 dominant-baseline=%22middle%22>⏱️</text></svg>">
 
@@ -140,9 +139,9 @@
   </div>
 
   <script>
-    let activeTimerId = null;
     let targetEndTimeObj = null;
 
+    // --- 毎秒の時計・カウントダウン・時間判定更新 ---
     function updateClock() {
       const now = new Date();
       document.getElementById('current-time').innerText = `現在時刻: ${now.toLocaleTimeString('ja-JP')}`;
@@ -152,12 +151,20 @@
         const targetStr = targetEndTimeObj.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
         document.getElementById('display-target-time').innerText = targetStr;
 
+        const settings = getSettings();
+        const beforeMs = settings.notifyBefore * 60 * 1000;
+        const timeToTarget = targetEndTimeObj.getTime() - now.getTime();
+
         if (diffMs > 0) {
           const diffMin = Math.floor(diffMs / 60000);
           const diffSec = Math.floor((diffMs % 60000) / 1000);
           document.getElementById('display-countdown').innerText = `あと ${diffMin}分 ${diffSec}秒`;
           document.getElementById('display-countdown').style.color = '#047857';
           document.title = `(${diffMin}分前) ☕ 休憩タイムカード`;
+
+          // 【重要改善】setTimeoutがOSに止められても、毎秒のループ内で「設定した時間になったか」を直接チェックして通知を確実に発火させる方式に変更しました
+          checkAndTriggerNotification(timeToTarget, settings);
+
         } else {
           document.getElementById('display-countdown').innerText = '⏰ 戻り時間を過ぎています！';
           document.getElementById('display-countdown').style.color = '#ef4444';
@@ -171,6 +178,34 @@
       }
     }
     setInterval(updateClock, 1000);
+
+    // 毎秒チェックして、ちょうど設定時間になったら通知を飛ばすフラグ管理
+    let notifiedFlags = { before: false, half: false, end: false };
+
+    function checkAndTriggerNotification(timeToTarget, settings) {
+      if (!('Notification' in window) || Notification.permission !== 'granted') return;
+
+      const beforeMs = settings.notifyBefore * 60 * 1000;
+      const halfMs = beforeMs / 2;
+
+      // 1回目通知（指定の何分前：誤差2秒以内）
+      if (!notifiedFlags.before && timeToTarget <= beforeMs && timeToTarget > beforeMs - 2000) {
+        new Notification(`☕ 休憩終了 ${settings.notifyBefore}分前です`, { body: 'そろそろ戻る準備を始めましょう。' });
+        notifiedFlags.before = true;
+      }
+
+      // 2回目通知（中間地点、通知回数2回以上の場合）
+      if (settings.notifyCount >= 2 && !notifiedFlags.half && timeToTarget <= halfMs && timeToTarget > halfMs - 2000) {
+        new Notification('⏰ まもなく休憩終了です', { body: 'あとわずかで休憩時間が終わります。' });
+        notifiedFlags.half = true;
+      }
+
+      // 3回目（または1回設定の終了時）通知（終了時刻ぴったり）
+      if (settings.notifyCount >= 3 && !notifiedFlags.end && timeToTarget <= 0 && timeToTarget > -2000) {
+        new Notification('🚨 休憩終了時間です！', { body: 'お仕事の時間です。お戻りください！' });
+        notifiedFlags.end = true;
+      }
+    }
 
     function initTargetTime() {
       const todayStr = new Date().toLocaleDateString('ja-JP');
@@ -214,22 +249,26 @@
       localStorage.setItem('break_min', document.getElementById('break-minutes').value);
       localStorage.setItem('notify_before', document.getElementById('notify-before').value);
       localStorage.setItem('notify_count', document.getElementById('notify-count').value);
+      alert('設定を保存しました！');
     }
 
-    const settings = getSettings();
-    document.getElementById('break-minutes').value = settings.breakMin;
-    document.getElementById('notify-before').value = settings.notifyBefore;
-    document.getElementById('notify-count').value = settings.notifyCount;
+    // 起動時に設定値を画面の入力欄に反映
+    const currentSettings = getSettings();
+    document.getElementById('break-minutes').value = currentSettings.breakMin;
+    document.getElementById('notify-before').value = currentSettings.notifyBefore;
+    document.getElementById('notify-count').value = currentSettings.notifyCount;
 
     function breakIn() {
       const now = new Date();
       const todayStr = now.toLocaleDateString('ja-JP');
       const timeStr = now.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
 
+      const settings = getSettings();
       const breakEnd = new Date(now.getTime() + settings.breakMin * 60000);
       const breakEndStr = breakEnd.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
 
       targetEndTimeObj = breakEnd;
+      notifiedFlags = { before: false, half: false, end: false }; // フラグリセット
 
       let records = getRecords();
       let todayRecord = records.find(r => r.date === todayStr);
@@ -244,8 +283,7 @@
 
       saveRecords(records);
       renderTodayStatus();
-      scheduleNotifications(breakEnd);
-      alert(`休憩入りを記録しました！\n戻り予定: ${breakEndStr}`);
+      alert(`休憩入りを記録しました！\n戻り予定: ${breakEndStr} (${settings.breakMin}分後)`);
     }
 
     function breakOut() {
@@ -266,7 +304,6 @@
       saveRecords(records);
       renderTodayStatus();
       targetEndTimeObj = null;
-      if (activeTimerId) clearTimeout(activeTimerId);
       document.title = '☕ 休憩タイムカード';
       alert('休憩戻りを記録しました。お疲れ様です！');
     }
@@ -279,7 +316,6 @@
       saveRecords(records);
       renderTodayStatus();
       targetEndTimeObj = null;
-      if (activeTimerId) clearTimeout(activeTimerId);
       document.title = '☕ 休憩タイムカード';
       alert('本日の打刻を削除しました。');
     }
@@ -340,43 +376,11 @@
           if (permission === 'granted') {
             alert('通知が許可されました！');
           } else {
-            alert('通知が拒否されています。ブラウザの設定をご確認ください。');
+            alert('通知が拒否されています。スマホやブラウザの設定をご確認ください。');
           }
         });
       } else {
         alert('このブラウザは通知機能に対応していません。');
-      }
-    }
-
-    function scheduleNotifications(breakEndTime) {
-      if (!('Notification' in window) || Notification.permission !== 'granted') return;
-      if (activeTimerId) clearTimeout(activeTimerId);
-
-      const now = new Date().getTime();
-      const endTime = breakEndTime.getData ? breakEndTime.getData() : breakEndTime.getTime();
-      const currentSettings = getSettings();
-      
-      const beforeMs = currentSettings.notifyBefore * 60 * 1000;
-      const firstNotifyTime = endTime - beforeMs;
-
-      if (firstNotifyTime > now) {
-        const delay1 = firstNotifyTime - now;
-        activeTimerId = setTimeout(() => {
-          new Notification(`☕ 休憩終了 ${currentSettings.notifyBefore}分前です`, { body: 'そろそろ戻る準備を始めましょう。' });
-          
-          if (currentSettings.notifyCount >= 2) {
-            setTimeout(() => {
-              new Notification('⏰ まもなく休憩終了です', { body: 'あとわずかで休憩時間が終わります。' });
-            }, beforeMs / 2);
-          }
-
-          if (currentSettings.notifyCount >= 3) {
-            setTimeout(() => {
-              new Notification('🚨 休憩終了時間です！', { body: 'お仕事の時間です。お戻りください！' });
-            }, beforeMs);
-          }
-
-        }, delay1);
       }
     }
   </script>
